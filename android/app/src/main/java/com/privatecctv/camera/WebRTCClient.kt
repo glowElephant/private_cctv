@@ -2,12 +2,14 @@ package com.privatecctv.camera
 
 import android.content.Context
 import android.util.Log
-import androidx.camera.view.PreviewView
+import com.google.gson.Gson
+import com.google.gson.JsonObject
 import org.webrtc.*
+import org.webrtc.Camera1Enumerator
+import org.webrtc.Camera2Enumerator
 
 class WebRTCClient(
-    private val context: Context,
-    private val previewView: PreviewView
+    private val context: Context
 ) {
     companion object {
         private const val TAG = "WebRTCClient"
@@ -22,10 +24,33 @@ class WebRTCClient(
     private var eglBase: EglBase? = null
 
     private var iceCandidateListener: ((String, String) -> Unit)? = null
+    private var localRenderer: SurfaceViewRenderer? = null
 
     private val iceServers = listOf(
         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer()
     )
+
+    private val externalSinks = mutableListOf<VideoSink>()
+
+    fun getEglContext(): EglBase.Context? = eglBase?.eglBaseContext
+
+    fun addVideoSink(sink: VideoSink) {
+        externalSinks.add(sink)
+        localVideoTrack?.addSink(sink)
+    }
+
+    fun removeVideoSink(sink: VideoSink) {
+        localVideoTrack?.removeSink(sink)
+        externalSinks.remove(sink)
+    }
+
+    fun setLocalRenderer(renderer: SurfaceViewRenderer) {
+        localRenderer = renderer
+        localRenderer?.init(eglBase?.eglBaseContext, null)
+        localRenderer?.setMirror(false)
+        localVideoTrack?.addSink(localRenderer)
+        Log.d(TAG, "로컬 렌더러 설정됨")
+    }
 
     fun initialize(onReady: (VideoTrack?, AudioTrack?) -> Unit) {
         eglBase = EglBase.create()
@@ -53,31 +78,76 @@ class WebRTCClient(
         // Video
         val videoSource = peerConnectionFactory?.createVideoSource(false)
         videoCapturer = createCameraCapturer()
+
+        Log.d(TAG, "Video capturer 생성: ${videoCapturer != null}")
+
+        if (videoCapturer == null) {
+            Log.e(TAG, "카메라를 찾을 수 없습니다!")
+            return
+        }
+
         surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", eglBase?.eglBaseContext)
+        Log.d(TAG, "SurfaceTextureHelper 생성: ${surfaceTextureHelper != null}")
 
         videoCapturer?.initialize(surfaceTextureHelper, context, videoSource?.capturerObserver)
-        videoCapturer?.startCapture(1280, 720, 30)
+
+        try {
+            // 1920x1080 30fps (Full HD)
+            videoCapturer?.startCapture(1920, 1080, 30)
+            Log.d(TAG, "카메라 캡처 시작 (1920x1080@30fps)")
+        } catch (e: Exception) {
+            Log.e(TAG, "카메라 캡처 시작 실패: ${e.message}")
+        }
 
         localVideoTrack = peerConnectionFactory?.createVideoTrack("video0", videoSource)
         localVideoTrack?.setEnabled(true)
+        Log.d(TAG, "Video track 생성: ${localVideoTrack != null}, enabled: ${localVideoTrack?.enabled()}")
 
         // Audio
         val audioConstraints = MediaConstraints()
         val audioSource = peerConnectionFactory?.createAudioSource(audioConstraints)
         localAudioTrack = peerConnectionFactory?.createAudioTrack("audio0", audioSource)
         localAudioTrack?.setEnabled(true)
+        Log.d(TAG, "Audio track 생성: ${localAudioTrack != null}")
     }
 
     private fun createCameraCapturer(): CameraVideoCapturer? {
+        // Camera2 사용 (고해상도 지원)
+        Log.d(TAG, "Camera2 사용 시도")
         val enumerator = Camera2Enumerator(context)
+        val cameraHandler = object : CameraVideoCapturer.CameraEventsHandler {
+            override fun onCameraError(errorDescription: String) {
+                Log.e(TAG, "카메라 에러: $errorDescription")
+            }
+            override fun onCameraDisconnected() {
+                Log.w(TAG, "카메라 연결 끊김")
+            }
+            override fun onCameraFreezed(errorDescription: String) {
+                Log.e(TAG, "카메라 멈춤: $errorDescription")
+            }
+            override fun onCameraOpening(cameraName: String) {
+                Log.d(TAG, "카메라 열기: $cameraName")
+            }
+            override fun onFirstFrameAvailable() {
+                Log.d(TAG, "첫 프레임 수신!")
+            }
+            override fun onCameraClosed() {
+                Log.d(TAG, "카메라 닫힘")
+            }
+        }
+
+        Log.d(TAG, "사용 가능한 카메라: ${enumerator.deviceNames.joinToString()}")
+
         for (deviceName in enumerator.deviceNames) {
             if (enumerator.isBackFacing(deviceName)) {
-                return enumerator.createCapturer(deviceName, null)
+                Log.d(TAG, "후면 카메라 사용: $deviceName")
+                return enumerator.createCapturer(deviceName, cameraHandler)
             }
         }
         for (deviceName in enumerator.deviceNames) {
             if (enumerator.isFrontFacing(deviceName)) {
-                return enumerator.createCapturer(deviceName, null)
+                Log.d(TAG, "전면 카메라 사용: $deviceName")
+                return enumerator.createCapturer(deviceName, cameraHandler)
             }
         }
         return null
@@ -163,7 +233,7 @@ class WebRTCClient(
 
     fun addIceCandidate(viewerId: String, candidateJson: String) {
         try {
-            val candidate = IceCandidate.fromJson(candidateJson)
+            val candidate = iceCandidateFromJson(candidateJson)
             peerConnections[viewerId]?.addIceCandidate(candidate)
         } catch (e: Exception) {
             Log.e(TAG, "ICE candidate 추가 실패: ${e.message}")
@@ -179,13 +249,27 @@ class WebRTCClient(
         iceCandidateListener = listener
     }
 
-    fun switchCamera() {
-        videoCapturer?.switchCamera(null)
+    fun switchCamera(onDone: ((Boolean) -> Unit)? = null) {
+        videoCapturer?.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {
+            override fun onCameraSwitchDone(isFrontCamera: Boolean) {
+                Log.d(TAG, "카메라 전환 완료: ${if (isFrontCamera) "전면" else "후면"}")
+                onDone?.invoke(isFrontCamera)
+            }
+
+            override fun onCameraSwitchError(error: String) {
+                Log.e(TAG, "카메라 전환 실패: $error")
+            }
+        })
     }
 
     fun release() {
         peerConnections.values.forEach { it.close() }
         peerConnections.clear()
+        localVideoTrack?.removeSink(localRenderer)
+        externalSinks.forEach { localVideoTrack?.removeSink(it) }
+        externalSinks.clear()
+        localRenderer?.release()
+        localRenderer = null
         videoCapturer?.stopCapture()
         videoCapturer?.dispose()
         localVideoTrack?.dispose()
@@ -199,15 +283,12 @@ class WebRTCClient(
         return """{"sdpMid":"$sdpMid","sdpMLineIndex":$sdpMLineIndex,"candidate":"$sdp"}"""
     }
 
-    companion object {
-        fun IceCandidate.Companion.fromJson(json: String): IceCandidate {
-            val regex = Regex(""""sdpMid":"([^"]*)".*"sdpMLineIndex":(\d+).*"candidate":"([^"]*)"""")
-            val match = regex.find(json) ?: throw Exception("Invalid ICE candidate JSON")
-            return IceCandidate(
-                match.groupValues[1],
-                match.groupValues[2].toInt(),
-                match.groupValues[3]
-            )
-        }
+    private fun iceCandidateFromJson(json: String): IceCandidate {
+        val gson = Gson()
+        val obj = gson.fromJson(json, JsonObject::class.java)
+        val sdpMid = obj.get("sdpMid")?.asString ?: "0"
+        val sdpMLineIndex = obj.get("sdpMLineIndex")?.asInt ?: 0
+        val candidate = obj.get("candidate")?.asString ?: ""
+        return IceCandidate(sdpMid, sdpMLineIndex, candidate)
     }
 }

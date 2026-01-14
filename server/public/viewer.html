@@ -79,7 +79,8 @@
   <div id="status" class="disconnected">연결 안됨</div>
 
   <div id="videoContainer">
-    <video id="remoteVideo" autoplay playsinline></video>
+    <video id="remoteVideo" autoplay playsinline muted></video>
+    <button id="unmuteBtn" style="display:none; position:absolute; top:10px; right:10px; z-index:10;">소리 켜기</button>
   </div>
 
   <div id="controls">
@@ -205,9 +206,23 @@
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
       });
 
+      let remoteStream = new MediaStream();
+      videoEl.srcObject = remoteStream;
+
       pc.ontrack = (event) => {
-        log('비디오 트랙 수신', 'info');
-        videoEl.srcObject = event.streams[0];
+        log(`트랙 수신: ${event.track.kind}`, 'info');
+        remoteStream.addTrack(event.track);
+        log(`스트림에 트랙 추가됨 - 비디오: ${remoteStream.getVideoTracks().length}, 오디오: ${remoteStream.getAudioTracks().length}`, 'info');
+
+        // 비디오 트랙이 추가되면 재생 시도
+        if (event.track.kind === 'video') {
+          videoEl.play().then(() => {
+            log('비디오 재생 시작', 'info');
+            document.getElementById('unmuteBtn').style.display = 'block';
+          }).catch(e => {
+            log('비디오 재생 실패: ' + e.message, 'error');
+          });
+        }
       };
 
       pc.onicecandidate = (event) => {
@@ -261,6 +276,11 @@
 
     connectBtn.onclick = connect;
     micBtn.onclick = toggleMic;
+    document.getElementById('unmuteBtn').onclick = () => {
+      videoEl.muted = false;
+      document.getElementById('unmuteBtn').style.display = 'none';
+      log('음소거 해제됨', 'info');
+    };
 
     log('CCTV 뷰어 준비됨', 'info');
   </script>

@@ -4,7 +4,12 @@ import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import okhttp3.*
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 
 class SignalingClient(
     private val serverUrl: String,
@@ -27,10 +32,24 @@ class SignalingClient(
 
     private var webSocket: WebSocket? = null
     private val gson = Gson()
-    private val client = OkHttpClient.Builder()
-        .readTimeout(0, TimeUnit.MILLISECONDS)
-        .hostnameVerifier { _, _ -> true } // 자체 서명 인증서 허용
-        .build()
+    private val client: OkHttpClient
+
+    init {
+        val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {}
+            override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {}
+            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+        })
+
+        val sslContext = SSLContext.getInstance("SSL")
+        sslContext.init(null, trustAllCerts, SecureRandom())
+
+        client = OkHttpClient.Builder()
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as X509TrustManager)
+            .hostnameVerifier { _, _ -> true }
+            .build()
+    }
 
     fun connect() {
         val wsUrl = serverUrl
