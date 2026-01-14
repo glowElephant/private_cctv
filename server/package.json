@@ -1,0 +1,14 @@
+{
+  "name": "cctv-server",
+  "version": "1.0.0",
+  "description": "WebRTC CCTV Relay Server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "cert": "node generate-cert.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0",
+    "selfsigned": "^2.4.1"
+  }
+}

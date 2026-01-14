@@ -1,0 +1,8 @@
+{
+  "port": 8443,
+  "tokens": {
+    "camera": "cam_secret_token_123",
+    "viewer": "view_secret_token_456"
+  },
+  "maxViewers": 3
+}
